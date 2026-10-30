@@ -22,10 +22,13 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Имя образа (ghcr требует нижний регистр)
+        id: img
+        run: echo "ref=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/jenkins-agent-python:1" >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@v6
         with:
           context: agent
           push: true
           provenance: false
           sbom: false
-          tags: ghcr.io/${{ github.repository_owner }}/jenkins-agent-python:1
+          tags: ${{ steps.img.outputs.ref }}
