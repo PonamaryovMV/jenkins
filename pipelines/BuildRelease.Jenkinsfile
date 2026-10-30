@@ -13,7 +13,7 @@ kind: Pod
 spec:
   containers:
     - name: python
-      image: python:3.14          # полный образ: есть git
+      image: ghcr.io/ponamaryovmv/jenkins-agent-python:1   # python + git + pyyaml (jenkins/agent)
       command: ["sleep"]
       args: ["infinity"]
       resources:
@@ -47,7 +47,7 @@ spec:
           currentBuild.displayName = "#${env.BUILD_NUMBER} ${params.TASK} ${params.VERSION}"
           currentBuild.description = "${params.SERVICES} · SCA=${params.SCA_PROFILE} SAST=${params.SAST_PROFILE}"
         }
-        sh 'pip install -q pyyaml && mkdir -p "$R"'
+        sh 'mkdir -p "$R"'
       }
     }
     stage('Образы в registry') {

@@ -13,7 +13,7 @@ kind: Pod
 spec:
   containers:
     - name: python
-      image: python:3.14
+      image: ghcr.io/ponamaryovmv/jenkins-agent-python:1
       command: ["sleep"]
       args: ["infinity"]
       resources:
@@ -44,7 +44,6 @@ spec:
         }
         withCredentials([string(credentialsId: 'github-token', variable: 'GH_TOKEN')]) {
           sh '''
-            pip install -q pyyaml
             git config --global --add safe.directory '*'
             python3 scripts/release_tool.py exclude --mode "$MODE" --service "$SERVICE" --task "$TASK" --reason "$REASON"
           '''

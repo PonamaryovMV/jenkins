@@ -12,7 +12,7 @@ kind: Pod
 spec:
   containers:
     - name: python
-      image: python:3.14-slim
+      image: ghcr.io/ponamaryovmv/jenkins-agent-python:1
       command: ["sleep"]
       args: ["infinity"]
 '''
