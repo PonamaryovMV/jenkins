@@ -1,45 +1,37 @@
-# jenkins — релизный пайплайн стенда
+# jenkins — пайплайны релиза ФП qa/at
 
-Jenkins разворачивается Argo CD из [`gitops-infra/components/jenkins`](https://github.com/PonamaryovMV/gitops-infra/tree/main/components/jenkins).
-Джоба `gitops-stand/app-release` создаётся через JCasC и берёт [`Jenkinsfile`](Jenkinsfile) из этого репозитория.
+Jenkins разворачивается Argo CD из [gitops-infra/components/jenkins](https://github.com/PonamaryovMV/gitops-infra/tree/main/components/jenkins),
+джобы создаются JCasC в папке **qa-at**. UI: http://jenkins.
 
-```
-Параметры → Checkout gitops-main → Тесты → SCA (эмуляция) → Quality Gate → Publish
-                                                                              │
-                                     GitHub Actions (build.yaml) ◀────────────┘
-                                              │
-                                     ghcr.io/ponamaryovmv/<app>:<VERSION> ─▶ Kargo ─▶ dev → stage → prod
-```
+Jenkins только пишет в git. В Kargo он не ходит — наоборот, Kargo вызывает Jenkins (DAST) и ждёт статус.
 
-| Параметр | Что делает |
-|---|---|
-| `APP` | `hello-api` / `color-web` |
-| `VERSION` | версия образа `X.Y.Z` |
-| `SCA_PROFILE` | эмулируемый результат SCA: `clean`, `low`, `medium` — QG пройден; `high`, `critical` — нет |
-| `PUBLISH` | после QG запустить сборку образа в GitHub Actions |
+| Джоба | Что делает | Пишет в |
+|---|---|---|
+| **BuildRelease** | образы в registry → SCA (список образов) → SAST (список репозиториев) → Quality Gate → **один коммит** `release.yaml` всех выбранных сервисов | `gitops-main`, ветка ФП `qa-at` |
+| **ExcludeService** | исключение сервиса из релиза, без сборки | `planned` → ветка `qa-at`; `urgent` / `clear` → `gitops-prod` |
+| **DAST** | эмуляция DAST по списку репозиториев; запускает Kargo (верификация `uat`) | — |
 
-## Quality Gate
+Сборки нет: образы `release-1-101`, `release-2-102`, `release-3-103` уже в ghcr. SCA, SAST и DAST — эмуляция
+([scripts/release_tool.py](scripts/release_tool.py)), политика Quality Gate — [scripts/policy.json](scripts/policy.json):
+релиз блокируется при любой `critical`/`high` и при `medium > 3`.
 
-Политика — [`qg/policy.json`](qg/policy.json): блокирует релиз при любой `critical`/`high` и при `medium > 3`.
+## Параметры
 
-| Файл | Роль |
-|---|---|
-| `qg/smoke_test.py` | компиляция + запуск `app.py` + проверка `/version`, `/health`, `/ready` |
-| `qg/sca_scan.py` | **эмуляция** SCA: состав по импортам и базовому образу, уязвимости `SIM-*` из каталога по профилю |
-| `qg/quality_gate.py` | сравнивает сводку отчёта с лимитами, код выхода 1 → стадия падает |
-| `qg/dispatch_build.py` | `workflow_dispatch` для `gitops-main/build.yaml` |
+**BuildRelease**: `TASK`, `VERSION` (тег), `SERVICES` (`mgmt,core,api`), `SCA_PROFILE` и `SAST_PROFILE`
+(`clean`/`low`/`medium` проходят, `high`/`critical` — нет).
 
-Отчёты (`reports/tests.json`, `sca.json`, `quality-gate.json`) архивируются в каждой сборке.
-Формат отчёта SCA близок к реальным сканерам — эмулятор можно заменить настоящим (Trivy, Grype, Dependency-Track),
-не трогая Quality Gate.
+**ExcludeService**: `SERVICE`, `MODE`, `TASK`, `REASON`.
 
-## Токен
+| MODE | Когда | Что дальше |
+|---|---|---|
+| `planned` | есть время на цикл uat | в ветке `qa-at` файл сервиса = версия PROD (если релиз уже в PROD — предыдущая) → новый Freight → uat → prod |
+| `urgent` | инцидент в PROD | запись в `gitops-prod/qa/at/release-exclude.yaml` → повторный Promote текущего Freight в prod: сервис вернётся к версии до релиза |
+| `clear` | исправление готово | снять срочное исключение |
 
-Стадия `Publish` использует credential `github-token` (JCasC берёт его из секрета `jenkins/jenkins-github`,
-который создаёт `scripts/windows/up.ps1` из `GITHUB_TOKEN`). Для запуска workflow токену нужны права:
-classic — scope **`repo`**; fine-grained — **Actions: Read and write** на `gitops-main`.
+**DAST**: `REPOS`, `ENVIRONMENT`, `RELEASE` (передаёт Kargo), `FAIL_REPOS` — эмуляция провала:
+поставьте значение по умолчанию `qa-at-core` в Configure, и следующий DAST от Kargo упадёт.
 
-## Сценарии
+## Учётки и токены
 
-- `SCA_PROFILE=clean`, `PUBLISH=true` — образ собирается, Kargo везёт его в dev → stage.
-- `SCA_PROFILE=high` — сборка падает на Quality Gate, образ не публикуется, Kargo ничего не видит.
+- `github-token` — GitHub PAT из `scripts/.env` (`GITHUB_TOKEN`), нужен scope `repo`: запись в `gitops-main` и `gitops-prod`.
+- пользователь `kargo` — им Kargo запускает DAST; пароль в секрете `jenkins-kargo` (создаёт `up.ps1`).

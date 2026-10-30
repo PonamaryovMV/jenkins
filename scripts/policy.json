@@ -1,0 +1,6 @@
+{
+  "name": "stand-default",
+  "description": "Релиз блокируется при любой critical/high в SCA или SAST и при medium > 3. low не ограничены (-1).",
+  "sca":  { "critical": 0, "high": 0, "medium": 3, "low": -1 },
+  "sast": { "critical": 0, "high": 0, "medium": 3, "low": -1 }
+}
