@@ -3,6 +3,11 @@
 Jenkins разворачивается Argo CD из [gitops-infra/components/jenkins](https://github.com/PonamaryovMV/gitops-infra/tree/main/components/jenkins),
 джобы создаются JCasC в папке **qa-at**. UI: http://jenkins.
 
+Контроллер — свой образ `ghcr.io/ponamaryovmv/jenkins-controller:2.580.2-jdk25` ([controller/](controller)):
+плагины ([controller/plugins.txt](controller/plugins.txt)) уже внутри, при старте Jenkins в интернет за ними не ходит.
+Новый плагин: добавить строку в `plugins.txt` → push → workflow `controller-image` пересоберёт образ.
+Пакеты `jenkins-controller` и `jenkins-agent-python` в ghcr должны быть **public**.
+
 Jenkins только пишет в git. В Kargo он не ходит — наоборот, Kargo вызывает Jenkins (DAST) и ждёт статус.
 
 | Джоба | Что делает | Пишет в |

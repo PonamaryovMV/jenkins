@@ -1,0 +1,11 @@
+# Плагины контроллера Jenkins стенда. Ставятся при сборке образа (controller/Dockerfile),
+# при старте pod'а Jenkins в интернет за плагинами не ходит.
+# Первые четыре — набор чарта jenkins 5.10.5 (controller.installPlugins), версии оттуда же.
+kubernetes:4560.vc25b_83890c34
+workflow-aggregator:608.v67378e9d3db_1
+git:5.11.0
+configuration-as-code:2140.v00e72b_047734
+# джобы описаны Job DSL в JCasC (gitops-infra/components/jenkins/values.yaml)
+job-dsl
+# граф стадий
+pipeline-graph-view

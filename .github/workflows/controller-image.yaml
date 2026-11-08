@@ -1,0 +1,35 @@
+# Образ контроллера ghcr.io/<owner>/jenkins-controller:2.580.2-jdk25 с плагинами внутри.
+# Собирается при изменении controller/ или вручную. Тег совпадает с версией Jenkins в чарте.
+name: controller-image
+
+on:
+  push:
+    branches: [main]
+    paths: ["controller/**", ".github/workflows/controller-image.yaml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Имя образа (ghcr требует нижний регистр)
+        id: img
+        run: echo "ref=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/jenkins-controller:2.580.2-jdk25" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: controller
+          push: true
+          provenance: false
+          sbom: false
+          tags: ${{ steps.img.outputs.ref }}
