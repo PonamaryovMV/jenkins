@@ -7,6 +7,8 @@
   sast     — ЭМУЛЯЦИЯ SAST по списку репозиториев
   gate     — Quality Gate по отчётам SCA и SAST (policy.json)
   release  — записать release.yaml сервисов в ветку ФП одним коммитом (BuildRelease)
+             + план выкатки по волнам release-plan.yaml (из deploy.dependsOn в values)
+  plan     — только посчитать и показать план (проверка зависимостей без коммита)
   exclude  — исключить сервис из релиза: planned / urgent / clear (ExcludeService)
   dast     — ЭМУЛЯЦИЯ DAST по списку репозиториев (джоба DAST, её запускает Kargo)
 
@@ -24,8 +26,12 @@ import time
 import urllib.error
 import urllib.request
 
-AS, FS = "qa", "at"
-FP = f"{AS}-{FS}"
+# ФП берётся из окружения: Jenkinsfile выставляет FP по папке джобы (qa-at/BuildRelease → qa-at)
+FP = os.getenv("FP", "qa-at")
+AS, FS = FP.split("-", 1)
+# Чьи образы использует ФП. На стенде у qa-bt своих образов нет — она берёт демо-образы qa-at
+# (в values: main.container.imageFunctionalSystem: at).
+IMAGE_FP = os.getenv("IMAGE_FP") or {"qa-bt": "qa-at"}.get(FP, FP)
 COMPONENTS = ["api", "worker"]
 REGISTRY = os.getenv("REGISTRY", "ghcr.io/ponamaryovmv")
 SOURCE_ORG = os.getenv("SOURCE_ORG", "https://github.com/PonamaryovMV")
@@ -59,7 +65,7 @@ def services_arg(value: str) -> list:
 
 
 def image(svc: str, comp: str, version: str) -> str:
-    return f"{REGISTRY}/{FP}-{svc}-{comp}:{version}"
+    return f"{REGISTRY}/{IMAGE_FP}-{svc}-{comp}:{version}"
 
 
 def source_repo(svc: str) -> str:
@@ -141,7 +147,7 @@ def cmd_images(a) -> int:
                 digest = "sha256:offline" if a.offline else registry_digest(ref)
                 log(f"  ✓ {ref}  {digest}")
                 result[svc]["images"].append(ref)
-                result[svc]["digests"][f"{FP}-{svc}-{comp}"] = digest
+                result[svc]["digests"][f"{IMAGE_FP}-{svc}-{comp}"] = digest
             except (urllib.error.URLError, KeyError, ValueError) as e:
                 log(f"  ✖ {ref}: {e}")
                 missing.append(ref)
@@ -224,7 +230,7 @@ def cmd_gate(a) -> int:
 # ---------------------------------------------------------------- BuildRelease → ветка ФП
 def release_doc(svc: str, version: str, info: dict, task: str, build: str, gate: dict) -> str:
     lines = [
-        "# Фиксирует версию сервиса. Пишет BuildRelease (ветка ФП qa-at), в окружения копирует Kargo.",
+        f"# Фиксирует версию сервиса. Пишет BuildRelease (ветка ФП {FP_BRANCH}), в окружения копирует Kargo.",
         "main:",
         "  container:",
         f"    registry: {REGISTRY}",
@@ -261,6 +267,7 @@ def cmd_release(a) -> int:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(release_doc(svc, a.version, info, a.task, a.build, gate))
             log(f"  {AS}/{FS}/{svc}/release.yaml → {a.version}")
+        write_plan(repo, a.repo, a.prod_repo)
         parts = ", ".join(f"{svc} {a.version}" for svc in data)
         sha = commit_and_push(repo, FP_BRANCH, f"{a.task} ФП {AS}/{FS}: {parts} (build #{a.build}, SCA/SAST PASSED)")
     write_json(a.out, {"branch": FP_BRANCH, "commit": sha})
@@ -305,6 +312,7 @@ def cmd_exclude(a) -> int:
                 log(f"Версия релиза уже в PROD — возвращаем к предыдущей версии PROD: {prod_version}")
             with open(dst, "w", encoding="utf-8") as f:
                 f.write(content)
+            write_plan(repo, a.repo, a.prod_repo)
             sha = commit_and_push(repo, FP_BRANCH,
                                   f"{a.task}: {svc} исключён из релиза ({a.reason}), возврат к {prod_version} (версия PROD)")
             log(f"Новый коммит в {FP_BRANCH}: {sha}. Kargo создаст Freight — проведите его uat → prod.")
@@ -346,6 +354,114 @@ def cmd_exclude(a) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- план выкатки (волны)
+# Разработчик в values окружения сервиса пишет:
+#   deploy:
+#     dependsOn: [api]
+# Отсюда считается порядок: волна 1 — сервисы без зависимостей, волна 2 — те, чьи зависимости
+# все в волне 1, и т.д. Kargo выкатывает волны по очереди: коммит волны → ждёт, пока её
+# Deployment'ы выкатились с нужной версией и готовы → следующая волна.
+def build_waves(services: list, deps: dict) -> list:
+    """deps: {сервис: [зависимости]} → [[сервисы волны 1], [сервисы волны 2], ...]."""
+    from graphlib import TopologicalSorter, CycleError
+    for svc, ds in deps.items():
+        unknown = sorted(set(ds) - set(services))
+        if unknown:
+            raise SystemExit(f"{svc}: в deploy.dependsOn сервисы не из ФП {AS}/{FS}: {', '.join(unknown)}")
+    ts = TopologicalSorter({s: deps.get(s, []) for s in services})
+    try:
+        ts.prepare()
+    except CycleError as e:
+        raise SystemExit(f"Зависимости по кругу: {' → '.join(e.args[1])}. Исправьте deploy.dependsOn в values")
+    waves = []
+    while ts.is_active():
+        ready = sorted(ts.get_ready())
+        waves.append(ready)
+        ts.done(*ready)
+    return waves
+
+
+def env_dependencies(repo_dir: str) -> dict:
+    """{окружение: {сервис: [зависимости]}} из values <АС>-<ФП>-<сервис>-<окр>.yaml."""
+    result = {}
+    base = os.path.join(repo_dir, AS, FS)
+    if not os.path.isdir(base):
+        return result
+    for svc in sorted(os.listdir(base)):
+        svc_dir = os.path.join(base, svc)
+        if not os.path.isdir(svc_dir):
+            continue
+        for env in sorted(os.listdir(svc_dir)):
+            values = os.path.join(svc_dir, env, f"{FP}-{svc}-{env}.yaml")
+            if os.path.isfile(values):
+                doc = read_yaml(values)
+                result.setdefault(env, {})[svc] = list(((doc.get("deploy") or {}).get("dependsOn")) or [])
+    return result
+
+
+def compute_plan(branch_dir: str, main_repo: str, prod_repo: str) -> dict:
+    """{окружение: [{сервис: версия}, ...]} — версии из ветки ФП, зависимости из main gitops-main/gitops-prod."""
+    base = os.path.join(branch_dir, AS, FS)
+    versions = {}
+    for svc in sorted(os.listdir(base)):
+        rel = os.path.join(base, svc, "release.yaml")
+        if os.path.isfile(rel):
+            versions[svc] = read_yaml(rel)["main"]["container"]["version"]
+    deps = {}
+    with tempfile.TemporaryDirectory() as tmp:
+        for name, url in (("main", main_repo), ("prod", prod_repo)):
+            d = os.path.join(tmp, name)
+            git("clone", "-q", "--depth", "1", "--branch", "main", auth_url(url), d)
+            deps.update(env_dependencies(d))
+    plan = {}
+    for env, env_deps in deps.items():
+        services = [s for s in versions if s in env_deps]
+        waves = build_waves(services, {s: env_deps[s] for s in services})
+        plan[env] = [{s: versions[s] for s in wave} for wave in waves]
+    return plan
+
+
+def plan_doc(plan: dict) -> str:
+    order = {"dev": 0, "test": 1, "uat": 2, "prod": 9}
+    lines = [
+        f"# План выкатки ФП {AS}/{FS} по волнам. Генерирует Jenkins из deploy.dependsOn в values окружений —",
+        "# руками не править. Kargo выкатывает волны по очереди: следующая начинается, когда сервисы",
+        "# предыдущей выкатились с этой версией и готовы.",
+    ]
+    for env in sorted(plan, key=lambda e: (order.get(e, 5), e)):
+        lines.append(f"{env}:")
+        for i, wave in enumerate(plan[env], 1):
+            items = ", ".join(f"{s}: {v}" for s, v in wave.items())
+            lines.append(f"  - {{ {items} }}   # волна {i}")
+    return "\n".join(lines) + "\n"
+
+
+# Сколько волн умеет стадия Kargo (строки wave1..waveN в kargo/<ФП>/stages.yaml)
+MAX_WAVES = int(os.getenv("MAX_WAVES", "3"))
+
+
+def write_plan(branch_dir: str, main_repo: str, prod_repo: str) -> None:
+    plan = compute_plan(branch_dir, main_repo, prod_repo)
+    too_long = {env: len(w) for env, w in plan.items() if len(w) > MAX_WAVES}
+    if too_long:
+        raise SystemExit(f"Волн больше, чем шагов wave в стадиях Kargo ({MAX_WAVES}): {too_long}. "
+                         "Добавьте строки wave в kargo/<ФП>/stages.yaml и поднимите MAX_WAVES")
+    path = os.path.join(branch_dir, AS, FS, "release-plan.yaml")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(plan_doc(plan))
+    log("План выкатки (волны):")
+    for env, waves in plan.items():
+        log(f"  {env}: " + "  →  ".join("[" + ", ".join(w) + "]" for w in waves))
+
+
+def cmd_plan(a) -> int:
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = os.path.join(tmp, "gitops")
+        clone(a.repo, FP_BRANCH, repo)
+        log(plan_doc(compute_plan(repo, a.repo, a.prod_repo)))
+    return 0
+
+
 # ---------------------------------------------------------------- DAST (эмуляция)
 def cmd_dast(a) -> int:
     repos = [r.strip() for r in a.repos.split(",") if r.strip()]
@@ -381,7 +497,11 @@ def main() -> int:
 
     s = sub.add_parser("release"); s.add_argument("--images", required=True); s.add_argument("--gate", required=True)
     s.add_argument("--version", required=True); s.add_argument("--task", required=True); s.add_argument("--build", required=True)
-    s.add_argument("--repo", default=GITOPS_REPO); s.add_argument("--out", required=True); s.set_defaults(fn=cmd_release)
+    s.add_argument("--repo", default=GITOPS_REPO); s.add_argument("--prod-repo", default=GITOPS_PROD_REPO)
+    s.add_argument("--out", required=True); s.set_defaults(fn=cmd_release)
+
+    s = sub.add_parser("plan"); s.add_argument("--repo", default=GITOPS_REPO); s.add_argument("--prod-repo", default=GITOPS_PROD_REPO)
+    s.set_defaults(fn=cmd_plan)
 
     s = sub.add_parser("exclude"); s.add_argument("--mode", choices=["planned", "urgent", "clear"], required=True)
     s.add_argument("--service", required=True); s.add_argument("--task", required=True); s.add_argument("--reason", default="")

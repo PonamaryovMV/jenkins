@@ -1,5 +1,6 @@
-// BuildRelease — релиз ФП qa/at.
-//   Образы → SCA (список образов) → SAST (список репозиториев) → Quality Gate → один коммит в ветку ФП qa-at.
+// BuildRelease — релиз ФП. ФП = папка джобы: qa-at/BuildRelease → qa-at, qa-bt/BuildRelease → qa-bt.
+//   Образы → SCA (список образов) → SAST (список репозиториев) → Quality Gate → один коммит в ветку ФП.
+//   В тот же коммит — план выкатки по волнам (release-plan.yaml) из deploy.dependsOn в values.
 // Сборки на стенде нет: образы с тегами release-1-101 / release-2-102 / release-3-103 уже лежат в ghcr.
 // Kargo увидит коммит в qa-at и создаст Freight. В Kargo Jenkins не ходит.
 
@@ -38,6 +39,7 @@ spec:
 
   environment {
     R = 'reports'
+    FP = "${env.JOB_NAME.tokenize('/')[0]}"
   }
 
   stages {
@@ -70,7 +72,7 @@ spec:
         sh 'python3 scripts/release_tool.py gate --sca "$R/sca.json" --sast "$R/sast.json" --policy scripts/policy.json --out "$R/gate.json"'
       }
     }
-    stage('Коммит в ветку ФП qa-at') {
+    stage('Коммит в ветку ФП') {
       steps {
         withCredentials([string(credentialsId: 'github-token', variable: 'GH_TOKEN')]) {
           sh '''
@@ -79,7 +81,7 @@ spec:
               --version "$VERSION" --task "$TASK" --build "$BUILD_NUMBER" --out "$R/commit.json"
           '''
         }
-        echo 'Kargo создаст Freight из этого коммита (Warehouse qa-at, ~30 с). Промоушен dev → test → uat → prod — в Kargo.'
+        echo "Kargo создаст Freight из этого коммита (Warehouse ${env.FP}, ~30 с). Промоушен dev → test → uat → prod — в Kargo."
       }
     }
   }
